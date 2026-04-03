@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ENCOUNTER v0.3</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { background: #0a0a0a; }
+  #root { max-width: 500px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// ==========================================
+// FIREBASE CONFIG
+// ==========================================
+firebase.initializeApp({
+  apiKey: "AIzaSyAsG5wls27RcdmTAzXAnzMjc-yDrUExrZk",
+  authDomain: "new-encounters.firebaseapp.com",
+  databaseURL: "https://new-encounters-default-rtdb.firebaseio.com",
+  projectId: "new-encounters",
+  storageBucket: "new-encounters.firebasestorage.app",
+  messagingSenderId: "537948739295",
+  appId: "1:537948739295:web:ab6672e5264fb77605fb6a",
+  measurementId: "G-NE0309LHX3"
+});
+const db = firebase.database();
+</script>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ==========================================
+// GAME DATA
+// ==========================================
+const WEAPONS = [
+  { id: "daggers", name: "Twin Daggers", type: "Close", dice: [4,4], baseSpeeds: [160,120], attacks: 2, special: "2 attacks", disarmable: true },
+  { id: "katana", name: "Katana", type: "Melee", dice: [6], baseSpeeds: [120], attacks: 1, special: "+1 Disarm", disarmable: true, disarmBonus: 1 },
+  { id: "spear", name: "Spear", type: "Melee & Ranged", dice: [6], baseSpeeds: [120], attacks: 1, special: "+1 Defense", disarmable: true, defBonus: 1 },
+  { id: "warhammer", name: "Warhammer", type: "Melee", dice: [8], baseSpeeds: [75], attacks: 1, special: "Ignores BLOCK", disarmable: true, ignoresBlock: true },
+  { id: "shotgun", name: "Shotgun", type: "Ranged", dice: [10], baseSpeeds: [55], attacks: 1, special: "Ignores DODGE, reload every 3rd", disarmable: true, reload: true, ignoresDodge: true },
+];
+const FISTS = { id: "fists", name: "Bare Fists", type: "Close", dice: [3,3], baseSpeeds: [100,130], attacks: 2, special: "—", disarmable: false };
+const ATTACK_STYLES = [
+  { id: "reckless", name: "RECKLESS", desc: "Attack die slower, defense die faster", atkSpeedMod: 40, defSpeedMod: -40 },
+  { id: "tactical", name: "TACTICAL", desc: "Balanced", atkSpeedMod: 0, defSpeedMod: 0 },
+  { id: "careful", name: "CAREFUL", desc: "Defense die slower, attack die faster", atkSpeedMod: -40, defSpeedMod: 40 },
+];
+const DEFENSE_TYPES = [
+  { id: "dodge", name: "DODGE", desc: "Success = 0 damage, dice is faster" },
+  { id: "block", name: "BLOCK", desc: "Subtract your roll from their damage" },
+  { id: "disarm", name: "DISARM", desc: "Win = strip their weapon, full damage if fail" },
+];
+const START_HP = 12;
+const BASE_DEF_SPEED = 120;
+const DODGE_SPEED_PENALTY = -30;
+const FONT = "-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+
+function getWeaponById(id) {
+  if (id === "fists") return {...FISTS};
+  return {...WEAPONS.find(w => w.id === id)} || {...FISTS};
+}
+function genCode() {
+  const c = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let r = "";
+  for (let i = 0; i < 4; i++) r += c[Math.floor(Math.random() * c.length)];
+  return r;
+}
+function freshPlayer(name) {
+  return { name, hp: START_HP, weaponId: null, originalWeaponId: null, style: null, defense: null, atkRolls: [], defRoll: null, shotsFired: 0 };
+}
+function getAtkSpeeds(weapon, styleId) {
+  const style = ATTACK_STYLES.find(s => s.id === styleId);
+  return weapon.baseSpeeds.map(s => Math.max(40, s + (style ? style.atkSpeedMod : 0)));
+}
+function getDefSpeed(styleId, defenseId) {
+  const style = ATTACK_STYLES.find(s => s.id === styleId);
+  let speed = BASE_DEF_SPEED + (style ? style.defSpeedMod : 0);
+  if (defenseId === "dodge") speed += DODGE_SPEED_PENALTY;
+  return Math.max(40, speed);
+}
+
+// ==========================================
+// APP
+// ==========================================
+function App() {
+  const [screen, setScreen] = useState("lobby");
+  const [mySlot, setMySlot] = useState(null);
+  const [roomCode, setRoomCode] = useState("");
+  const [joinInput, setJoinInput] = useState("");
+  const [game, setGame] = useState(null);
+  const roomRef = useRef(null);
+
+  // Dice local state
+  const [diceVals, setDiceVals] = useState([1,1]);
+  const [diceRunning, setDiceRunning] = useState(false);
+  const [diceStopped, setDiceStopped] = useState(false);
+  const [stoppedAtkVals, setStoppedAtkVals] = useState([]);
+  const [defDiceVal, setDefDiceVal] = useState(1);
+  const [defDiceRunning, setDefDiceRunning] = useState(false);
+  const [defDiceStopped, setDefDiceStopped] = useState(false);
+  const [stoppedDefVal, setStoppedDefVal] = useState(null);
+  const diceRefs = useRef([]);
+  const defDiceRef = useRef(null);
+  const diceRunningRef = useRef(false);
+  const defDiceRunningRef = useRef(false);
+  const diceValsRef = useRef([1,1]);
+  const defDiceValRef = useRef(1);
+  const logRef = useRef(null);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [game?.log]);
+
+  // ==========================================
+  // FIREBASE SYNC
+  // ==========================================
+  const listenToRoom = (code) => {
+    if (roomRef.current) roomRef.current.off();
+    const ref = db.ref("rooms/" + code);
+    roomRef.current = ref;
+    ref.on("value", snap => {
+      const d = snap.val();
+      if (d) setGame(d);
+    });
+  };
+  const saveGame = (g) => {
+    if (roomRef.current) roomRef.current.set(g);
+  };
+  const addLog = (g, msg, cls) => {
+    if (!g.log) g.log = [];
+    g.log.push({msg, cls});
+    if (g.log.length > 50) g.log = g.log.slice(-50);
+  };
+
+  // ==========================================
+  // ACTIONS
+  // ==========================================
+  const createRoom = () => {
+    const code = genCode();
+    setRoomCode(code);
+    setMySlot("p1");
+    const g = {
+      phase: "waiting", round: 0,
+      p1: freshPlayer("P1"), p2: null,
+      log: [{msg: "ENCOUNTER v0.3", cls: "sys"}, {msg: "Waiting for P2...", cls: "sys"}]
+    };
+    listenToRoom(code);
+    saveGame(g);
+    setScreen("game");
+  };
+
+  const joinRoom = () => {
+    const code = joinInput.toUpperCase().trim();
+    if (code.length !== 4) return;
+    setRoomCode(code);
+    setMySlot("p2");
+    listenToRoom(code);
+    const ref = db.ref("rooms/" + code);
+    ref.once("value", snap => {
+      const g = snap.val();
+      if (!g || !g.p1) { alert("Room not found"); return; }
+      if (g.p2) { alert("Room full"); return; }
+      g.p2 = freshPlayer("P2");
+      g.phase = "pick-weapon-p1";
+      addLog(g, "P2 joined! Pick weapons.", "sys");
+      saveGame(g);
+      setScreen("game");
+    });
+  };
+
+  const destroyRoom = () => {
+    if (roomRef.current) { roomRef.current.remove(); roomRef.current.off(); }
+    setScreen("lobby"); setMySlot(null); setGame(null); setRoomCode("");
+  };
+
+  const pickWeapon = (weaponId) => {
+    const g = JSON.parse(JSON.stringify(game));
+    const slot = g.phase === "pick-weapon-p1" ? "p1" : "p2";
+    if (slot !== mySlot) return;
+    const w = WEAPONS.find(wp => wp.id === weaponId);
+    g[slot].weaponId = weaponId;
+    g[slot].originalWeaponId = weaponId;
+    addLog(g, `${slot.toUpperCase()} chose ${w.name}`, slot);
+    if (slot === "p1") { g.phase = "pick-weapon-p2"; }
+    else { g.round = 1; addLog(g, "— Round 1 —", "sys"); g.phase = "choose-p1"; }
+    saveGame(g);
+  };
+
+  const pickStyle = (styleId) => {
+    const g = JSON.parse(JSON.stringify(game));
+    g[mySlot].style = styleId;
+    saveGame(g);
+  };
+
+  const pickDefense = (defId) => {
+    const g = JSON.parse(JSON.stringify(game));
+    g[mySlot].defense = defId;
+    saveGame(g);
+  };
+
+  const lockChoices = () => {
+    const g = JSON.parse(JSON.stringify(game));
+    const p = g[mySlot];
+    const styleName = ATTACK_STYLES.find(s => s.id === p.style).name;
+    const defName = p.defense === "recover" ? "RECOVER" : DEFENSE_TYPES.find(d => d.id === p.defense)?.name || p.defense.toUpperCase();
+    addLog(g, `${p.name} → ${styleName} + ${defName}`, mySlot);
+    if (mySlot === "p1") g.phase = "choose-p2";
+    else g.phase = "roll-p1-atk";
+    saveGame(g);
+  };
+
+  // DICE
+  const startAttackDice = () => {
+    const g = JSON.parse(JSON.stringify(game));
+    const p = g[mySlot];
+    const weapon = getWeaponById(p.weaponId);
+
+    if (weapon.reload && p.shotsFired >= 2) {
+      p.atkRolls = [0];
+      p.shotsFired = 0;
+      addLog(g, `  ${p.name} is RELOADING`, mySlot);
+      saveGame(g);
+      setTimeout(() => {
+        const g2 = JSON.parse(JSON.stringify(game));
+        g2[mySlot].atkRolls = [0];
+        g2[mySlot].shotsFired = 0;
+        g2.phase = mySlot === "p1" ? "roll-p1-def" : "roll-p2-def";
+        saveGame(g2);
+      }, 1500);
+      return;
+    }
+
+    const speeds = getAtkSpeeds(weapon, p.style);
+    setDiceStopped(false);
+    setStoppedAtkVals([]);
+    diceRunningRef.current = true;
+    setDiceRunning(true);
+    const vals = weapon.dice.map(() => 1);
+    diceValsRef.current = [...vals];
+    setDiceVals([...vals]);
+    const refs = [];
+    weapon.dice.forEach((maxVal, i) => {
+      let v = 1;
+      const ref = setInterval(() => {
+        v = (v % maxVal) + 1;
+        vals[i] = v;
+        diceValsRef.current = [...vals];
+        setDiceVals([...vals]);
+      }, speeds[i]);
+      refs.push(ref);
+    });
+    diceRefs.current = refs;
+  };
+
+  const stopAttackDice = () => {
+    if (!diceRunningRef.current) return;
+    diceRunningRef.current = false;
+    diceRefs.current.forEach(r => clearInterval(r));
+    diceRefs.current = [];
+    setDiceRunning(false);
+
+    const g = JSON.parse(JSON.stringify(game));
+    const p = g[mySlot];
+    const weapon = getWeaponById(p.weaponId);
+    const rolls = diceValsRef.current.slice(0, weapon.dice.length);
+
+    setStoppedAtkVals([...rolls]);
+    setDiceStopped(true);
+
+    p.atkRolls = [...rolls];
+    if (weapon.reload) p.shotsFired = (p.shotsFired || 0) + 1;
+    const total = rolls.reduce((a,b) => a+b, 0);
+    const rollStr = rolls.length > 1 ? rolls.join(" + ") + " = " + total : String(total);
+    addLog(g, `  ${p.name} attack: ${rollStr}`, mySlot);
+    saveGame(g);
+
+    setTimeout(() => {
+      setDiceStopped(false);
+      const g2 = JSON.parse(JSON.stringify(game));
+      g2[mySlot].atkRolls = [...rolls];
+      if (weapon.reload) g2[mySlot].shotsFired = (g2[mySlot].shotsFired || 0) + 1;
+      g2.phase = mySlot === "p1" ? "roll-p1-def" : "roll-p2-def";
+      saveGame(g2);
+    }, 2000);
+  };
+
+  const startDefDice = () => {
+    const p = game[mySlot];
+    const speed = getDefSpeed(p.style, p.defense);
+    setDefDiceStopped(false);
+    setStoppedDefVal(null);
+    defDiceRunningRef.current = true;
+    setDefDiceRunning(true);
+    let v = 1;
+    defDiceValRef.current = 1;
+    setDefDiceVal(1);
+    defDiceRef.current = setInterval(() => {
+      v = (v % 6) + 1;
+      defDiceValRef.current = v;
+      setDefDiceVal(v);
+    }, speed);
+  };
+
+  const stopDefDice = () => {
+    if (!defDiceRunningRef.current) return;
+    defDiceRunningRef.current = false;
+    clearInterval(defDiceRef.current);
+    defDiceRef.current = null;
+    setDefDiceRunning(false);
+
+    const val = defDiceValRef.current;
+    setStoppedDefVal(val);
+    setDefDiceStopped(true);
+
+    const g = JSON.parse(JSON.stringify(game));
+    g[mySlot].defRoll = val;
+    addLog(g, `  ${g[mySlot].name} defense: ${val}`, mySlot);
+
+    if (mySlot === "p1") g.phase = "wait-p2-roll";
+    else g.phase = "resolve";
+    saveGame(g);
+
+    setTimeout(() => { setDefDiceStopped(false); }, 2000);
+  };
+
+  // RESOLVE (only p1 resolves to avoid double-resolve)
+  useEffect(() => {
+    if (!game || game.phase !== "resolve" || mySlot !== "p1") return;
+    if (!game.p1.atkRolls.length || !game.p2.atkRolls.length) return;
+    if (game.p1.defRoll === null || game.p2.defRoll === null) return;
+
+    const g = JSON.parse(JSON.stringify(game));
+    addLog(g, "---", "sys");
+
+    const p1w = getWeaponById(g.p1.weaponId);
+    const p2w = getWeaponById(g.p2.weaponId);
+
+    // P1 attacks P2
+    const p1Atk = g.p1.atkRolls.reduce((a,b) => a+b, 0);
+    const p2Def = g.p2.defRoll + (p2w.defBonus || 0);
+    const p1Reloading = g.p1.atkRolls[0] === 0 && g.p1.atkRolls.length === 1;
+    let p1Dmg = 0;
+
+    if (p1Reloading) {
+      addLog(g, "P1 reloaded — no attack", "p1");
+    } else {
+      addLog(g, `P1 attacks: ${p1Atk}`, "p1");
+      if (g.p2.defense === "dodge") {
+        if (p1w.ignoresDodge) { p1Dmg = p1Atk; addLog(g, `Shotgun ignores DODGE — ${p1Dmg} damage!`, "dmg"); }
+        else if (p2Def >= p1Atk) { addLog(g, `P2 DODGED! (${p2Def} vs ${p1Atk})`, "p2"); }
+        else { p1Dmg = p1Atk; addLog(g, `P2 failed dodge — ${p1Dmg} damage!`, "dmg"); }
+      } else if (g.p2.defense === "block") {
+        if (p1w.ignoresBlock) { p1Dmg = p1Atk; addLog(g, `Ignores BLOCK — ${p1Dmg} damage!`, "dmg"); }
+        else { p1Dmg = Math.max(0, p1Atk - p2Def); addLog(g, `P2 blocked ${p2Def} — takes ${p1Dmg}`, "p2"); }
+      } else if (g.p2.defense === "disarm") {
+        const db2 = p2w.disarmBonus || 0;
+        if ((p2Def+db2) >= p1Atk && p1w.disarmable) { addLog(g, `P2 DISARMED P1's ${p1w.name}!`, "win"); g.p1.weaponId = "fists"; }
+        else { p1Dmg = p1Atk; addLog(g, `Disarm failed — ${p1Dmg} damage!`, "dmg"); }
+      } else if (g.p2.defense === "recover") {
+        if (p2Def >= p1Atk) { addLog(g, `P2 RECOVERED their ${getWeaponById(g.p2.originalWeaponId).name}!`, "win"); g.p2.weaponId = g.p2.originalWeaponId; }
+        else { p1Dmg = p1Atk; addLog(g, `Recovery failed — ${p1Dmg} damage!`, "dmg"); }
+      }
+    }
+    g.p2.hp = Math.max(0, g.p2.hp - p1Dmg);
+
+    // P2 attacks P1
+    const p2Atk = g.p2.atkRolls.reduce((a,b) => a+b, 0);
+    const p1wNow = getWeaponById(g.p1.weaponId);
+    const p1Def = g.p1.defRoll + (p1wNow.defBonus || 0);
+    const p2Reloading = g.p2.atkRolls[0] === 0 && g.p2.atkRolls.length === 1;
+    let p2Dmg = 0;
+
+    if (p2Reloading) {
+      addLog(g, "P2 reloaded — no attack", "p2");
+    } else {
+      addLog(g, `P2 attacks: ${p2Atk}`, "p2");
+      if (g.p1.defense === "dodge") {
+        if (p2w.ignoresDodge) { p2Dmg = p2Atk; addLog(g, `Shotgun ignores DODGE — ${p2Dmg} damage!`, "dmg"); }
+        else if (p1Def >= p2Atk) { addLog(g, `P1 DODGED! (${p1Def} vs ${p2Atk})`, "p1"); }
+        else { p2Dmg = p2Atk; addLog(g, `P1 failed dodge — ${p2Dmg} damage!`, "dmg"); }
+      } else if (g.p1.defense === "block") {
+        if (p2w.ignoresBlock) { p2Dmg = p2Atk; addLog(g, `Ignores BLOCK — ${p2Dmg} damage!`, "dmg"); }
+        else { p2Dmg = Math.max(0, p2Atk - p1Def); addLog(g, `P1 blocked ${p1Def} — takes ${p2Dmg}`, "p1"); }
+      } else if (g.p1.defense === "disarm") {
+        const db1 = p1wNow.disarmBonus || 0;
+        if ((p1Def+db1) >= p2Atk && p2w.disarmable) { addLog(g, `P1 DISARMED P2's ${p2w.name}!`, "win"); g.p2.weaponId = "fists"; }
+        else { p2Dmg = p2Atk; addLog(g, `Disarm failed — ${p2Dmg} damage!`, "dmg"); }
+      } else if (g.p1.defense === "recover") {
+        if (p1Def >= p2Atk) { addLog(g, `P1 RECOVERED their ${getWeaponById(g.p1.originalWeaponId).name}!`, "win"); g.p1.weaponId = g.p1.originalWeaponId; }
+        else { p2Dmg = p2Atk; addLog(g, `Recovery failed — ${p2Dmg} damage!`, "dmg"); }
+      }
+    }
+    g.p1.hp = Math.max(0, g.p1.hp - p2Dmg);
+
+    g.lastResult = { p1Dmg, p2Dmg };
+
+    if (g.p1.hp <= 0 || g.p2.hp <= 0) {
+      if (g.p1.hp <= 0 && g.p2.hp <= 0) addLog(g, "DOUBLE KO!", "win");
+      else if (g.p1.hp <= 0) addLog(g, "P2 WINS!", "win");
+      else addLog(g, "P1 WINS!", "win");
+      g.phase = "done";
+    } else {
+      g.phase = "result";
+    }
+    saveGame(g);
+  }, [game?.phase]);
+
+  const nextRound = () => {
+    const g = JSON.parse(JSON.stringify(game));
+    g.round++;
+    g.p1.style = null; g.p1.defense = null; g.p1.atkRolls = []; g.p1.defRoll = null;
+    g.p2.style = null; g.p2.defense = null; g.p2.atkRolls = []; g.p2.defRoll = null;
+    g.lastResult = null;
+    addLog(g, `— Round ${g.round} —`, "sys");
+    g.phase = "choose-p1";
+    saveGame(g);
+  };
+
+  // ==========================================
+  // COMPONENTS
+  // ==========================================
+  const logColors = { sys: "#ddd", p1: "#6bb5ff", p2: "#ff8888", win: "#f0c845", dmg: "#ff6666", lvl: "#6eff9a" };
+
+  const Log = () => (
+    <div ref={logRef} style={S.log}>
+      {(game?.log || []).slice(-30).map((l, i) => (
+        <div key={i} style={{ color: logColors[l.cls] || "#ccc" }}>{l.msg}</div>
+      ))}
+    </div>
+  );
+
+  const HPBar = ({ current, max, color }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", minWidth: 60 }}>{current}/{max}</div>
+      <div style={{ flex: 1, height: 14, background: "#333", borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ width: (current/max*100)+"%", height: "100%", background: current <= 3 ? "#ff4a4a" : color, transition: "width 0.3s" }} />
+      </div>
+    </div>
+  );
+
+  const PlayerStatus = ({ p, slot }) => {
+    if (!p) return null;
+    const color = slot === "p1" ? "#4a9eff" : "#ff6b6b";
+    const w = getWeaponById(p.weaponId);
+    const reloading = w.reload && p.shotsFired >= 2;
+    return (
+      <div style={{ flex: 1, border: "1px solid #444", padding: 12, background: "#111", borderRadius: 6 }}>
+        <div style={{ fontWeight: 700, fontSize: 18, color: "#fff", marginBottom: 4 }}>{p.name}</div>
+        <HPBar current={p.hp} max={START_HP} color={color} />
+        <div style={{ fontSize: 20, color: "#fff", fontWeight: 700 }}>⚔ {w.name}</div>
+        <div style={{ fontSize: 15, color: "#ddd", marginTop: 4 }}>{w.type} • {w.dice.map(d=>`d${d}`).join(" + ")}</div>
+        <div style={{ fontSize: 15, color: "#6eff9a", marginTop: 2 }}>{w.special}</div>
+        {reloading && <div style={{ fontSize: 15, color: "#f0c845", fontWeight: 700, marginTop: 4 }}>⟳ MUST RELOAD</div>}
+      </div>
+    );
+  };
+
+  const AttackDice = ({ weapon, vals, running, stopped, stoppedVals, onStart, onStop }) => (
+    <div style={S.diceArea}>
+      <div style={{ fontSize: 16, color: "#ccc", marginBottom: 10 }}>ATTACK — tap to stop {weapon.dice.length > 1 ? "both" : ""}</div>
+      <div style={{ display: "flex", justifyContent: "center", gap: 20 }}>
+        {weapon.dice.map((maxVal, i) => (
+          <div key={i} style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 14, color: "#ccc", marginBottom: 4 }}>d{maxVal}</div>
+            <div style={{
+              fontSize: 64, fontWeight: 800, width: 90, height: 80, lineHeight: "80px",
+              color: stopped ? "#e8b031" : running ? "#666" : "#555",
+              border: stopped ? "2px solid #e8b031" : "1px solid #444", background: "#0a0a0a", borderRadius: 6,
+              fontFamily: "'Courier New', monospace",
+            }}>{stopped ? stoppedVals[i] : running ? vals[i] : "—"}</div>
+          </div>
+        ))}
+      </div>
+      {stopped ? (
+        <div style={{ fontSize: 22, color: "#e8b031", fontWeight: 700, marginTop: 14 }}>
+          {stoppedVals.length > 1 ? stoppedVals.join(" + ") + " = " + stoppedVals.reduce((a,b)=>a+b,0) : stoppedVals[0]}
+        </div>
+      ) : !running ? (
+        <button style={S.tapBtn} onPointerDown={e=>{e.preventDefault();onStart()}}>START</button>
+      ) : (
+        <button style={{...S.tapBtn, background:"#ff6b6b"}} onPointerDown={e=>{e.preventDefault();onStop()}}>TAP!</button>
+      )}
+    </div>
+  );
+
+  const DefenseDice = ({ defense, val, running, stopped, stoppedVal, onStart, onStop }) => (
+    <div style={S.diceArea}>
+      <div style={{ fontSize: 16, color: "#ccc", marginBottom: 10 }}>
+        DEFENSE — {defense === "recover" ? "RECOVER" : defense.toUpperCase()}
+        {defense === "dodge" && <span style={{color:"#e8b031"}}> (faster!)</span>}
+      </div>
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 14, color: "#ccc", marginBottom: 4 }}>d6</div>
+          <div style={{
+            fontSize: 64, fontWeight: 800, width: 90, height: 80, lineHeight: "80px",
+            color: stopped ? "#4aff7a" : running ? "#666" : "#555",
+            border: stopped ? "2px solid #4aff7a" : "1px solid #444", background: "#0a0a0a", borderRadius: 6,
+            fontFamily: "'Courier New', monospace",
+          }}>{stopped ? stoppedVal : running ? val : "—"}</div>
+        </div>
+      </div>
+      {stopped ? (
+        <div style={{ fontSize: 22, color: "#4aff7a", fontWeight: 700, marginTop: 14 }}>{stoppedVal}</div>
+      ) : !running ? (
+        <button style={S.tapBtn} onPointerDown={e=>{e.preventDefault();onStart()}}>START</button>
+      ) : (
+        <button style={{...S.tapBtn, background:"#4aff7a", color:"#0a0a0a"}} onPointerDown={e=>{e.preventDefault();onStop()}}>TAP!</button>
+      )}
+    </div>
+  );
+
+  // ==========================================
+  // SCREENS
+  // ==========================================
+  if (screen === "lobby") {
+    return (
+      <div style={S.container}>
+        <h1 style={S.title}>ENCOUNTER</h1>
+        <div style={S.ver}>v0.3 // ONLINE</div>
+        <div style={{ padding: "20px 0" }}>
+          <button style={S.bigBtn} onClick={createRoom}>CREATE FIGHT</button>
+          <div style={{ color: "#999", textAlign: "center", margin: "20px 0 10px", fontSize: 14 }}>— or join —</div>
+          <input style={{ width: "100%", padding: 14, textAlign: "center", background: "#111", border: "1px solid #444", color: "#f0c845", fontFamily: FONT, fontSize: 24, letterSpacing: 8, borderRadius: 6, marginBottom: 8 }} placeholder="CODE" maxLength="4" value={joinInput} onChange={e => setJoinInput(e.target.value)} />
+          <button style={S.bigBtn} onClick={joinRoom}>JOIN FIGHT</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!game) return <div style={S.container}><div style={{color:"#999",textAlign:"center",padding:40}}>Loading...</div></div>;
+
+  const me = game[mySlot];
+  const them = game[mySlot === "p1" ? "p2" : "p1"];
+  const isMyTurn = (phase) => {
+    if (phase.includes("p1") && mySlot === "p1") return true;
+    if (phase.includes("p2") && mySlot === "p2") return true;
+    return false;
+  };
+
+  // WAITING
+  if (game.phase === "waiting") {
+    return (
+      <div style={S.container}>
+        <h1 style={S.title}>ENCOUNTER</h1>
+        <div style={S.ver}>v0.3</div>
+        <div style={{ textAlign: "center", padding: "40px 0" }}>
+          <div style={{ color: "#ccc", fontSize: 16, marginBottom: 12 }}>Send this code to your friend:</div>
+          <div style={{ color: "#f0c845", fontSize: 48, fontWeight: 700, letterSpacing: 8, marginBottom: 20 }}>{roomCode}</div>
+          <div style={{ color: "#ccc", fontSize: 14 }}>Waiting for P2 to join...</div>
+        </div>
+        <button style={{...S.bigBtn, background:"none", border:"1px solid #444", color:"#999"}} onClick={destroyRoom}>CANCEL</button>
+      </div>
+    );
+  }
+
+  // WEAPON PICK
+  if (game.phase === "pick-weapon-p1" || game.phase === "pick-weapon-p2") {
+    const isMyPick = (game.phase === "pick-weapon-p1" && mySlot === "p1") || (game.phase === "pick-weapon-p2" && mySlot === "p2");
+    const who = game.phase === "pick-weapon-p1" ? "P1" : "P2";
+    return (
+      <div style={S.container}>
+        <h1 style={S.title}>ENCOUNTER</h1>
+        <div style={S.ver}>Room: {roomCode}</div>
+        <div style={S.phase}>{isMyPick ? "CHOOSE YOUR WEAPON" : `Waiting for ${who}...`}</div>
+        {isMyPick && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+            {WEAPONS.map(w => (
+              <button key={w.id} onClick={() => pickWeapon(w.id)} style={{
+                padding: 16, background: "#111", border: "1px solid #444", fontFamily: FONT, cursor: "pointer",
+                textAlign: "left", borderRadius: 6, display: "flex", justifyContent: "space-between", alignItems: "center",
+              }}>
+                <div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: "#fff" }}>{w.name}</div>
+                  <div style={{ fontSize: 15, color: "#ddd", marginTop: 4 }}>{w.type} • {w.dice.map(d=>`d${d}`).join(" + ")}</div>
+                </div>
+                <div style={{ fontSize: 15, color: "#6eff9a", textAlign: "right", maxWidth: "45%" }}>{w.special}</div>
+              </button>
+            ))}
+          </div>
+        )}
+        <Log />
+      </div>
+    );
+  }
+
+  // CHOOSE STYLE + DEFENSE
+  if (game.phase === "choose-p1" || game.phase === "choose-p2") {
+    const isMyChoose = (game.phase === "choose-p1" && mySlot === "p1") || (game.phase === "choose-p2" && mySlot === "p2");
+    const who = game.phase === "choose-p1" ? "P1" : "P2";
+
+    if (!isMyChoose) {
+      return (
+        <div style={S.container}>
+          <h1 style={S.title}>ENCOUNTER</h1>
+          <div style={S.ver}>Round {game.round} • {roomCode}</div>
+          <div style={S.phase}>Waiting for {who}...</div>
+          <div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div>
+          <Log />
+        </div>
+      );
+    }
+
+    const isFists = me.weaponId === "fists";
+    return (
+      <div style={S.container}>
+        <h1 style={S.title}>ENCOUNTER</h1>
+        <div style={S.ver}>Round {game.round} • {roomCode}</div>
+        <div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div>
+        <div style={S.phase}>CHOOSE</div>
+
+        <div style={{ fontSize: 18, color: "#f0c845", letterSpacing: 2, marginTop: 12, marginBottom: 8 }}>ATTACK STYLE</div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+          {ATTACK_STYLES.map(s => (
+            <button key={s.id} onClick={() => pickStyle(s.id)} style={{
+              flex: 1, padding: "16px 6px", fontFamily: FONT, fontSize: 18, fontWeight: 700, cursor: "pointer",
+              border: me.style === s.id ? "2px solid #f0c845" : "1px solid #444",
+              background: me.style === s.id ? "#1a1800" : "#151515",
+              color: me.style === s.id ? "#f0c845" : "#fff", textAlign: "center", borderRadius: 6,
+            }}>
+              <div>{s.name}</div>
+              <div style={{ fontSize: 14, fontWeight: 400, color: "#ccc", marginTop: 6 }}>{s.desc}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ fontSize: 18, color: "#6eff9a", letterSpacing: 2, marginBottom: 8 }}>DEFENSE</div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+          {DEFENSE_TYPES.map(d => {
+            const showRecover = isFists && d.id === "disarm";
+            const label = showRecover ? "RECOVER" : d.name;
+            const desc = showRecover ? "Win = get your weapon back" : d.desc;
+            const defId = showRecover ? "recover" : d.id;
+            return (
+              <button key={d.id} onClick={() => pickDefense(defId)} style={{
+                flex: 1, padding: "16px 6px", fontFamily: FONT, fontSize: 18, fontWeight: 700, cursor: "pointer",
+                border: me.defense === defId ? "2px solid #6eff9a" : "1px solid #444",
+                background: me.defense === defId ? "#0a1a0a" : "#151515",
+                color: me.defense === defId ? "#6eff9a" : "#fff", textAlign: "center", borderRadius: 6,
+              }}>
+                <div>{label}</div>
+                <div style={{ fontSize: 14, fontWeight: 400, color: "#ccc", marginTop: 6 }}>{desc}</div>
+              </button>
+            );
+          })}
+        </div>
+
+        {me.style && me.defense && <button style={S.bigBtn} onClick={lockChoices}>LOCK IN</button>}
+        <Log />
+      </div>
+    );
+  }
+
+  // ROLL ATTACK
+  if (game.phase === "roll-p1-atk" || game.phase === "roll-p2-atk") {
+    const isMyRoll = isMyTurn(game.phase);
+    const who = game.phase.includes("p1") ? "P1" : "P2";
+    if (!isMyRoll) {
+      return (<div style={S.container}><h1 style={S.title}>ENCOUNTER</h1><div style={S.ver}>Round {game.round}</div><div style={S.phase}>{who} is attacking...</div><div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div><Log /></div>);
+    }
+    const weapon = getWeaponById(me.weaponId);
+    return (
+      <div style={S.container}>
+        <h1 style={S.title}>ENCOUNTER</h1>
+        <div style={S.ver}>Round {game.round}</div>
+        <div style={S.phase}>YOUR ATTACK</div>
+        <div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div>
+        <AttackDice weapon={weapon} vals={diceVals} running={diceRunning} stopped={diceStopped} stoppedVals={stoppedAtkVals} onStart={startAttackDice} onStop={stopAttackDice} />
+        <Log />
+      </div>
+    );
+  }
+
+  // ROLL DEFENSE
+  if (game.phase === "roll-p1-def" || game.phase === "roll-p2-def") {
+    const isMyRoll = isMyTurn(game.phase);
+    const who = game.phase.includes("p1") ? "P1" : "P2";
+    if (!isMyRoll) {
+      return (<div style={S.container}><h1 style={S.title}>ENCOUNTER</h1><div style={S.ver}>Round {game.round}</div><div style={S.phase}>{who} is defending...</div><div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div><Log /></div>);
+    }
+    return (
+      <div style={S.container}>
+        <h1 style={S.title}>ENCOUNTER</h1>
+        <div style={S.ver}>Round {game.round}</div>
+        <div style={S.phase}>YOUR DEFENSE</div>
+        <div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div>
+        <DefenseDice defense={me.defense} val={defDiceVal} running={defDiceRunning} stopped={defDiceStopped} stoppedVal={stoppedDefVal} onStart={startDefDice} onStop={stopDefDice} />
+        <Log />
+      </div>
+    );
+  }
+
+  // WAIT FOR P2 ROLL (P1 sees this after their def roll)
+  if (game.phase === "wait-p2-roll") {
+    if (mySlot === "p2") {
+      // P2 needs to roll attack
+      const weapon = getWeaponById(me.weaponId);
+      return (
+        <div style={S.container}>
+          <h1 style={S.title}>ENCOUNTER</h1>
+          <div style={S.ver}>Round {game.round}</div>
+          <div style={S.phase}>YOUR ATTACK</div>
+          <div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div>
+          <AttackDice weapon={weapon} vals={diceVals} running={diceRunning} stopped={diceStopped} stoppedVals={stoppedAtkVals} onStart={startAttackDice} onStop={stopAttackDice} />
+          <Log />
+        </div>
+      );
+    }
+    return (<div style={S.container}><h1 style={S.title}>ENCOUNTER</h1><div style={S.ver}>Round {game.round}</div><div style={S.phase}>Waiting for P2...</div><div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div><Log /></div>);
+  }
+
+  // RESULT
+  if (game.phase === "result" && game.lastResult) {
+    return (
+      <div style={S.container}>
+        <h1 style={S.title}>ENCOUNTER</h1>
+        <div style={S.ver}>Round {game.round}</div>
+        <div style={{ textAlign: "center", padding: "24px 0", cursor: "pointer" }} onClick={mySlot === "p1" ? nextRound : null}>
+          <div style={{ fontSize: 22, color: "#fff", marginBottom: 8 }}>P1 dealt <span style={{color:"#f0c845",fontWeight:700}}>{game.lastResult.p1Dmg}</span> → P2</div>
+          <div style={{ fontSize: 22, color: "#fff", marginBottom: 14 }}>P2 dealt <span style={{color:"#f0c845",fontWeight:700}}>{game.lastResult.p2Dmg}</span> → P1</div>
+          <div style={{ fontSize: 16, color: "#ddd" }}>{mySlot === "p1" ? "tap to continue" : "P1 advances..."}</div>
+        </div>
+        <div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div>
+        <Log />
+      </div>
+    );
+  }
+
+  // DONE
+  if (game.phase === "done") {
+    let winText = "DOUBLE KO!";
+    if (game.p1.hp > 0) winText = "P1 WINS!";
+    if (game.p2.hp > 0) winText = "P2 WINS!";
+    return (
+      <div style={S.container}>
+        <h1 style={S.title}>ENCOUNTER</h1>
+        <div style={S.ver}>FIGHT OVER</div>
+        <div style={{ textAlign: "center", padding: "30px 0" }}>
+          <div style={{ fontSize: 32, color: "#f0c845", fontWeight: 700, marginBottom: 16 }}>{winText}</div>
+          <div style={{ color: "#ddd", fontSize: 16, marginBottom: 20 }}>Rounds: {game.round}</div>
+          <button style={S.bigBtn} onClick={destroyRoom}>NEW FIGHT</button>
+        </div>
+        <div style={S.players}><PlayerStatus p={game.p1} slot="p1" /><PlayerStatus p={game.p2} slot="p2" /></div>
+        <Log />
+      </div>
+    );
+  }
+
+  // FALLBACK
+  return (<div style={S.container}><h1 style={S.title}>ENCOUNTER</h1><div style={S.phase}>...</div><Log /></div>);
+}
+
+// ==========================================
+// STYLES
+// ==========================================
+const SFONT = "-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+const S = {
+  container: { background: "#0a0a0a", color: "#ddd", fontFamily: SFONT, fontSize: 15, minHeight: "100vh", padding: 12, maxWidth: 500, margin: "0 auto" },
+  title: { fontSize: 28, color: "#e8b031", letterSpacing: 4, textAlign: "center", margin: 0, fontFamily: "'Courier New', monospace" },
+  ver: { color: "#999", fontSize: 14, textAlign: "center", marginBottom: 14 },
+  phase: { textAlign: "center", color: "#f0c845", fontSize: 22, fontWeight: 700, letterSpacing: 2, marginBottom: 8 },
+  players: { display: "flex", gap: 8, marginBottom: 12 },
+  diceArea: { border: "1px solid #444", background: "#111", padding: 24, marginBottom: 12, textAlign: "center", borderRadius: 6 },
+  tapBtn: { background: "#e8b031", color: "#0a0a0a", border: "none", padding: "18px 60px", fontFamily: SFONT, fontSize: 22, fontWeight: 700, cursor: "pointer", marginTop: 14, letterSpacing: 2, touchAction: "manipulation", borderRadius: 6 },
+  bigBtn: { display: "block", width: "100%", padding: 18, background: "#e8b031", color: "#0a0a0a", border: "none", fontFamily: SFONT, fontSize: 20, fontWeight: 700, cursor: "pointer", letterSpacing: 2, marginBottom: 10, borderRadius: 6 },
+  log: { background: "#181818", border: "1px solid #444", padding: 14, fontSize: 15, lineHeight: 1.9, maxHeight: 200, overflowY: "auto", fontFamily: SFONT, borderRadius: 6 },
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
