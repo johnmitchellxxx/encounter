@@ -38,7 +38,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const WEAPONS = [
   { id: "daggers", name: "Twin Daggers", type: "Close", dice: [4,4], baseSpeeds: [160,120], attacks: 2, special: "2 attacks", disarmable: true },
   { id: "katana", name: "Katana", type: "Melee", dice: [6], baseSpeeds: [120], attacks: 1, special: "+1 Disarm", disarmable: true, disarmBonus: 1 },
-  { id: "spear", name: "Spear", type: "Melee & Ranged", dice: [6], baseSpeeds: [120], attacks: 1, special: "+1 Defense", disarmable: true, defBonus: 1 },
+  { id: "spear", name: "Spear of Fortitude", type: "Melee & Ranged", dice: [6], baseSpeeds: [120], attacks: 1, special: "+1 Defense", disarmable: true, defBonus: 1 },
   { id: "warhammer", name: "Warhammer", type: "Melee", dice: [8], baseSpeeds: [75], attacks: 1, special: "Ignores BLOCK", disarmable: true, ignoresBlock: true },
   { id: "shotgun", name: "Shotgun", type: "Ranged", dice: [10], baseSpeeds: [55], attacks: 1, special: "Ignores DODGE, reload every 3rd", disarmable: true, reload: true, ignoresDodge: true },
 ];
