@@ -180,7 +180,7 @@ function App() {
     alog(g,`${g[mySlot].name} initiative: ${val}`,mySlot);
     // Check if both rolled
     const other=mySlot==="p1"?"p2":"p1";
-    if(g[other].initRoll!==null) {
+    if(g[other].initRoll !== null && g[other].initRoll !== undefined) {
       let first;
       if(g.p1.initRoll > g.p2.initRoll) first="p1";
       else if(g.p2.initRoll > g.p1.initRoll) first="p2";
@@ -409,8 +409,8 @@ function App() {
   }
 
   if(game.phase==="initiative") {
-    const iRolled=me.initRoll!==null;
-    const theyRolled=them?.initRoll!==null;
+    const iRolled = me.initRoll !== null && me.initRoll !== undefined;
+    const theyRolled = them && them.initRoll !== null && them.initRoll !== undefined;
     return(<div style={S.container}><h1 style={S.title}>ENCOUNTER</h1><div style={S.ver}>Round {game.round}</div>
     <Players/>
     <div style={S.phase}>INITIATIVE</div>
