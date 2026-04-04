@@ -62,7 +62,7 @@ const FONT = "-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 function getW(id) { if (id==="fists") return {...FISTS}; const w=WEAPONS.find(x=>x.id===id); return w ? {...w} : {...FISTS}; }
 function getAtkSpeeds(weapon, styleId) { const s=ATTACK_STYLES.find(x=>x.id===styleId); return weapon.baseSpeeds.map(sp=>Math.max(40,sp+(s?s.atkSpeedMod:0))); }
 function getDefSpeed(styleId, defenseId) { const s=ATTACK_STYLES.find(x=>x.id===styleId); let sp=BASE_DEF_SPEED+(s?s.defSpeedMod:0); if(defenseId==="dodge") sp+=DODGE_SPEED_PENALTY; return Math.max(40,sp); }
-function isReloading(p) { return p.weaponId && getW(p.weaponId).reload && p.shotsFired >= 2; }
+function isReloading(p) { return p && p.weaponId && getW(p.weaponId).reload && p.shotsFired >= 2; }
 function genCode() { const c="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; let r=""; for(let i=0;i<4;i++) r+=c[Math.floor(Math.random()*c.length)]; return r; }
 function freshP(name) { return { name, hp: START_HP, weaponId: null, originalWeaponId: null, style: null, defense: null, atkRolls: [], defRoll: null, shotsFired: 0, initRoll: null, locked: false }; }
 
@@ -76,6 +76,25 @@ function App() {
   const [joinInput, setJoinInput] = useState("");
   const [game, setGame] = useState(null);
   const roomRef = useRef(null);
+
+  // RECONNECT on load
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("encounter-session");
+      if (saved) {
+        const { slot, code } = JSON.parse(saved);
+        if (slot && code) {
+          setMySlot(slot);
+          setRoomCode(code);
+          setScreen("game");
+          // Start listening
+          const r = db.ref("rooms/" + code);
+          roomRef.current = r;
+          r.on("value", s => { const d = s.val(); if (d) setGame(d); else { localStorage.removeItem("encounter-session"); setScreen("lobby"); } });
+        }
+      }
+    } catch(e) {}
+  }, []);
 
   // Dice local
   const [diceVals, setDiceVals] = useState([1,1]);
@@ -119,19 +138,22 @@ function App() {
   // ACTIONS
   const createRoom = () => {
     const code=genCode(); setRoomCode(code); setMySlot("p1");
+    localStorage.setItem("encounter-session", JSON.stringify({slot:"p1",code}));
     const g={phase:"waiting",round:0,p1:freshP("P1"),p2:null,firstPlayer:null,log:[{msg:"ENCOUNTER v0.4",cls:"sys"},{msg:"Waiting for P2...",cls:"sys"}]};
     listen(code); save(g); setScreen("game");
   };
   const joinRoom = () => {
     const code=joinInput.toUpperCase().trim(); if(code.length!==4) return;
-    setRoomCode(code); setMySlot("p2"); listen(code);
+    setRoomCode(code); setMySlot("p2");
+    localStorage.setItem("encounter-session", JSON.stringify({slot:"p2",code}));
+    listen(code);
     db.ref("rooms/"+code).once("value",s=>{
       const g=s.val(); if(!g||!g.p1){alert("Room not found");return;} if(g.p2){alert("Room full");return;}
       g.p2=freshP("P2"); g.phase="pick-weapon"; alog(g,"P2 joined!","sys");
       save(g); setScreen("game");
     });
   };
-  const destroy = () => { if(roomRef.current){roomRef.current.remove();roomRef.current.off();} setScreen("lobby"); setMySlot(null); setGame(null); setRoomCode(""); };
+  const destroy = () => { localStorage.removeItem("encounter-session"); if(roomRef.current){roomRef.current.remove();roomRef.current.off();} setScreen("lobby"); setMySlot(null); setGame(null); setRoomCode(""); };
 
   const pickWeapon = (wId) => {
     const g=JSON.parse(JSON.stringify(game)); const w=WEAPONS.find(x=>x.id===wId);
@@ -354,7 +376,8 @@ function App() {
   );
 
   if(!game) return <div style={S.container}><div style={{color:"#999",textAlign:"center",padding:40}}>Loading...</div></div>;
-  const me=game[mySlot]; const other=mySlot==="p1"?"p2":"p1"; const them=game[other];
+  if(!mySlot) return <div style={S.container}><div style={{color:"#999",textAlign:"center",padding:40}}>Reconnecting...</div></div>;
+  const me=game[mySlot] || {}; const other=mySlot==="p1"?"p2":"p1"; const them=game[other] || {};
 
   if(game.phase==="waiting") return(
     <div style={S.container}><h1 style={S.title}>ENCOUNTER</h1><div style={S.ver}>v0.4</div>
@@ -365,7 +388,7 @@ function App() {
   );
 
   if(game.phase==="pick-weapon") {
-    const myPicked=me.weaponId!==null;
+    const myPicked = me && me.weaponId ? true : false;
     return(<div style={S.container}><h1 style={S.title}>ENCOUNTER</h1><div style={S.ver}>{roomCode}</div>
     <Players/>
     <div style={S.phase}>{myPicked?"Waiting for opponent...":"CHOOSE YOUR WEAPON"}</div>
